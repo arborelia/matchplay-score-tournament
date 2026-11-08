@@ -2,13 +2,15 @@
 {% block content %}
 <div class="section-heading">
 <div><p class="eyebrow">THE LINEUP</p><h2>Machines &amp; multipliers</h2></div>
+<div class="refresh-controls" data-refresh-controls hidden><button class="text-button" type="button" data-refresh>↻ Refresh</button><button class="text-button" type="button" data-auto aria-pressed="true">Auto: on</button></div>
 </div>
 <p class="section-description">Multiply your machine score by the value shown to get its contribution to your card.</p>
-<div class="machine-grid">{% for era, label, display in [('old', 'Old era', 'Alphanumeric'), ('mid', 'Mid era', 'Dot matrix / DMD'), ('new', 'New era', 'Full LCD')] %}<section class="panel">
+<div class="machine-grid" data-score-content>{% for era, label, display in [('old', 'Old era', 'Alphanumeric'), ('mid', 'Mid era', 'Dot matrix / DMD'), ('new', 'New era', 'Full LCD')] %}<section class="panel">
 <div class="panel-bar"><h3><span class="era era-{{ era }}">{{ label }}</span></h3><span>{{ display }}</span></div>
 {% for arena in arenas if arena.era == era %}<div class="machine-catalog-row"><strong>{{ arena.name }}</strong><span class="catalog-multiplier">× {{ arena.multiplier }}</span></div>
 {% else %}<p class="empty-state">No configured machines in this era.</p>{% endfor %}</section>
 {% endfor %}</div>
 
 {% with rules_expanded=true %}{% include "rules.html" %}{% endwith %}
+{% include "refresh_status.html" %}
 {% endblock %}

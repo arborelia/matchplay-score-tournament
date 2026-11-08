@@ -389,7 +389,7 @@
   let busy = false;
   let lastUpdated = new Date(status.dataset.updatedAt);
   const staticSnapshot = status.dataset.staticSnapshot === 'true';
-  const checkInterval = 60000;
+  const checkInterval = 25000;
   let failures = 0;
   let failure = '';
   let sourceState = status.dataset.sourceState || 'ready';
@@ -406,6 +406,11 @@
     cache_unavailable: 'Score cache is unavailable.',
     unavailable: 'Tournament update is unavailable.',
     waiting: 'Waiting for saved tournament data.',
+    authentication_error: 'Match Play authentication failed.',
+    authorization_error: 'Match Play denied access.',
+    recovery_pending: 'Waiting for the publisher to retry Match Play.',
+    publishing: 'The publisher is updating saved scores.',
+    publisher_interrupted: 'The publisher was interrupted; saved scores remain available.',
   };
   const savedAge = () => {
     const seconds = Math.max(0, Math.floor((Date.now() - lastUpdated.getTime()) / 1000));
@@ -420,17 +425,17 @@
       nextCheck = 0;
       return;
     }
-    delay = Math.max(delay, sourceRetryAt - Date.now(), requestRetryAt - Date.now(), 0);
+    delay = Math.max(delay, requestRetryAt - Date.now(), 0);
     nextCheck = Date.now() + delay;
     refreshTimer = setTimeout(() => refresh(), delay);
   };
   const updateStatus = () => {
     autoButton.textContent = `Auto: ${auto ? 'on' : 'off'}`;
     autoButton.setAttribute('aria-pressed', String(auto));
-    refreshButton.disabled = busy || Date.now() < Math.max(sourceRetryAt, requestRetryAt);
+    refreshButton.disabled = busy || Date.now() < requestRetryAt;
     if (busy) return;
     const time = lastUpdated.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-    let snapshot = `Snapshot: ${time}`;
+    let snapshot = Number.isFinite(lastUpdated.getTime()) ? `Snapshot: ${time}` : 'No published scores yet';
     if (staticSnapshot) {
       const date = lastUpdated.toLocaleDateString([], {
         month: 'short',
@@ -442,13 +447,14 @@
     const reason = !navigator.onLine ? 'You are offline.' : failure || sourceMessages[sourceState] || '';
     if (reason || sourceState === 'cached') {
       const detail = reason || 'Showing saved scores.';
-      const wait = Math.max(0, Math.ceil((Math.max(sourceRetryAt, requestRetryAt) - Date.now()) / 1000));
+      const wait = Math.max(0, Math.ceil((requestRetryAt - Date.now()) / 1000));
+      const publisherWait = Math.max(0, Math.ceil((sourceRetryAt - Date.now()) / 1000));
       const retry = auto
         ? `Next check in ${Math.max(0, Math.ceil((nextCheck - Date.now()) / 1000))}s.`
         : `Automatic checks paused. ${wait ? `Refresh available in ${wait}s.` : 'Use Refresh to check.'}`;
-      status.textContent = `${snapshot} · ${savedAge()} · ${detail} ${retry}`;
+      status.textContent = `${snapshot}${savedAge() ? ` · ${savedAge()}` : ''} · ${detail}${publisherWait ? ` Publisher retry in ${publisherWait}s.` : ''} ${retry}`;
     } else {
-      status.textContent = `${snapshot} · ${auto ? 'checks every 60s.' : 'checks paused.'}`;
+      status.textContent = `${snapshot} · ${auto ? 'checks every 25s.' : 'checks paused.'}`;
     }
     if (reason) status.dataset.error = 'true';
     else delete status.dataset.error;
@@ -456,7 +462,7 @@
   const refresh = async (manual = false) => {
     if (busy) return;
     if ((!manual && (!auto || document.hidden)) || !navigator.onLine ||
-        Date.now() < Math.max(sourceRetryAt, requestRetryAt)) {
+        Date.now() < requestRetryAt) {
       schedule();
       updateStatus();
       return;
@@ -475,7 +481,7 @@
       const response = await fetch(location.href, {
         headers: { 'X-Requested-With': 'ScoreHigh' },
         cache: 'no-cache',
-        signal: AbortSignal.timeout(60000),
+        signal: AbortSignal.timeout(20000),
       });
       if (!response.ok) {
         const retry = response.headers.get('Retry-After');
@@ -533,7 +539,7 @@
       console.warn('ScoreHigh update failed', { path: location.pathname, error: error.name, status: error.status });
     } finally {
       busy = false;
-      schedule(Math.min(120000, checkInterval * 2 ** Math.min(3, Math.max(0, failures - 1))));
+      schedule(checkInterval);
       updateStatus();
     }
   };

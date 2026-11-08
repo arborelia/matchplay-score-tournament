@@ -51,13 +51,17 @@ def main():
             )
             refresh.click()
             expect(status).to_contain_text("Match Play rate limit reached.")
-            expect(refresh).to_be_disabled()
+            expect(refresh).to_be_enabled()
             count = reads.call_count
-            page.clock.run_for(59000)
-            assert reads.call_count == count
+            # Browsers keep reading snapshots during the publisher's cooldown.
+            for _ in range(2):
+                with page.expect_response(url):
+                    page.clock.run_for(25000)
+                expect(status).to_contain_text("Match Play rate limit reached.")
+            assert reads.call_count > count
             health.update(state="ready", retry_at="")
             with page.expect_response(url):
-                page.clock.run_for(2000)
+                page.clock.run_for(25000)
             expect(status).to_contain_text("checks every 25s")
             expect(status).not_to_have_attribute("data-error", "true")
 

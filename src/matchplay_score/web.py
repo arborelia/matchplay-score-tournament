@@ -4,6 +4,8 @@ from hashlib import sha256
 from importlib.metadata import version
 from math import ceil
 from random import Random
+from hmac import compare_digest
+import os
 
 import requests
 from flask import Flask, abort, g, render_template, request
@@ -18,6 +20,8 @@ from .matchplay_api import (
     snapshot_details,
 )
 from .ranking import best_cards, player_cards
+from .publisher import Publisher
+from .snapshot_store import StorageUnavailable
 from .tournament import (
     ARENAS,
     CARD_GAME_LIMIT,
@@ -29,7 +33,7 @@ from .tournament import (
 
 app = Flask(__name__)
 register_examples(app)
-APP_VERSION = version("matchplay-score") + "-invalid-standings-1"
+APP_VERSION = version("matchplay-score") + "-publisher-snapshots-1"
 TOURNAMENT_INFO = {
     281672: "Test Tournament",
     282316: "Score High for Trans Lives",
@@ -96,11 +100,7 @@ def score_timestamp(tournament_id):
     health = snapshot_details(tournament_id)
     g.score_health = health
     g.cached_scores = bool(health["updated_at"] and health["state"] != "ready")
-    return (
-        health["updated_at"]
-        or app.config.get("SNAPSHOT_AT")
-        or datetime.now(UTC).isoformat()
-    )
+    return health["updated_at"] or app.config.get("SNAPSHOT_AT") or ""
 
 
 @app.before_request
@@ -112,6 +112,10 @@ def known_tournament():
 
 @app.after_request
 def cache_public_pages(response):
+    if request.endpoint in {"render_publisher", "render_health"}:
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Vercel-CDN-Cache-Control"] = "no-store"
+        return response
     if request.method in {"GET", "HEAD"} and request.endpoint != "static":
         if response.status_code == 200:
             response.headers["Cache-Control"] = "public, max-age=0, must-revalidate"
@@ -201,9 +205,14 @@ def render_overlay(tournament_id: int):
 
 
 def standings_page(tournament_id: int, *, monitor: bool = False):
-    cards = best_cards(tournament_id, use_cache=True, include_invalid=not monitor)
+    missing = False
+    try:
+        cards = best_cards(tournament_id, use_cache=True, include_invalid=not monitor)
+    except ScoreCacheUnavailable:
+        cards = []
+        missing = True
     title = tournament_title(tournament_id)
-    return render_template(
+    html = render_template(
         "ranking.html",
         cards=cards,
         title=title,
@@ -212,24 +221,58 @@ def standings_page(tournament_id: int, *, monitor: bool = False):
         active_tab="standings",
         monitor=monitor,
     )
+    return saved_page_response(html, missing)
+
+
+def saved_page_response(html, missing):
+    if not missing:
+        return html
+    reason = getattr(g, "score_health", {}).get("state", "waiting")
+    return html, 503, {"X-ScoreHigh-Error": reason}
+
+
+@app.route("/health/<int:tournament_id>")
+def render_health(tournament_id):
+    return snapshot_details(tournament_id)
+
+
+@app.route("/api/publish/<int:tournament_id>", methods=["GET", "POST"])
+def render_publisher(tournament_id):
+    secret = os.environ.get("CRON_SECRET")
+    if not secret:
+        return {"error": "Publisher authentication is not configured"}, 503
+    if not compare_digest(request.headers.get("Authorization", ""), f"Bearer {secret}"):
+        return {"error": "Unauthorized"}, 401
+    try:
+        result = Publisher().run(tournament_id, force=request.args.get("force") == "1")
+    except StorageUnavailable:
+        return {
+            "error": "Publisher storage or budget configuration is unavailable"
+        }, 503
+    return result, 503 if result["status"] == "unavailable" else 200
 
 
 @app.route("/player/<int:tournament_id>/<path:player_name>")
 def render_player(tournament_id: int, player_name: str):
-    cards = player_cards(tournament_id, player_name)
-    if not cards and "_" in player_name:
+    missing = False
+    try:
+        cards = player_cards(tournament_id, player_name)
+    except ScoreCacheUnavailable:
+        cards = []
+        missing = True
+    if not missing and not cards and "_" in player_name:
         player_name = player_name.replace("_", " ")
         cards = player_cards(tournament_id, player_name)
-    if not cards:
+    if not cards and not missing:
         abort(404)
-    player_name = cards[0].player_name
+    player_name = cards[0].player_name if cards else player_name.replace("_", " ")
     valid_cards = [card for card in cards if card.is_valid()]
-    standings = best_cards(tournament_id, use_cache=True)
+    standings = best_cards(tournament_id, use_cache=True) if not missing else []
     rank = next(
         (i for i, card in enumerate(standings, 1) if card.player_name == player_name),
         None,
     )
-    return render_template(
+    html = render_template(
         "player.html",
         cards=cards,
         player_name=player_name,
@@ -240,18 +283,28 @@ def render_player(tournament_id: int, player_name: str):
         updated_at=score_timestamp(tournament_id),
         active_tab="standings",
     )
+    return saved_page_response(html, missing)
 
 
 @app.route("/machines/<int:tournament_id>")
 def render_machines(tournament_id: int):
-    tournament = parse_tournament(get_tournament_data_cached(tournament_id))
-    return render_template(
+    missing = False
+    try:
+        arenas = parse_tournament(
+            get_tournament_data_cached(tournament_id)
+        ).arenas_by_id.values()
+    except ScoreCacheUnavailable:
+        arenas = []
+        missing = True
+    html = render_template(
         "machines.html",
-        arenas=tournament.arenas_by_id.values(),
+        arenas=arenas,
         title=tournament_title(tournament_id),
         tournament_id=tournament_id,
         active_tab="machines",
+        updated_at=score_timestamp(tournament_id),
     )
+    return saved_page_response(html, missing)
 
 
 @app.route("/how-it-works/<int:tournament_id>")

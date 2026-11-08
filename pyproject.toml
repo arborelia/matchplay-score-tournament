@@ -31,13 +31,14 @@ requires = ["uv_build>=0.12.11,<0.13.0"]
 build-backend = "uv_build"
 
 [tool.uv.build-backend]
-source-include = ["tests/**", "tools/**", ".github/workflows/pages.yml", ".gitignore", "uv.lock", ".python-version"]
+source-include = ["tests/**", "tools/**", "PUBLISHER.md", ".github/workflows/pages.yml", ".gitignore", "uv.lock", ".python-version"]
 
 [dependency-groups]
 dev = [
     "pytest",
     "ruff",
     "ipython",
+    "fakeredis[lua]>=2.40.0",
 ]
 
 [tool.vercel]

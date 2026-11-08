@@ -1,223 +1,134 @@
-from concurrent.futures import ThreadPoolExecutor
+"""Browser requests are strict snapshot readers, never upstream clients."""
+
 from copy import deepcopy
-from threading import Event
-from unittest.mock import Mock
+from unittest.mock import patch
 
 import pytest
-import requests
 
-from matchplay_score import matchplay_api as api
-
-
-@pytest.fixture
-def upstream(monkeypatch):
-    clock = [1000.0]
-    monkeypatch.setattr(api, "time", lambda: clock[0])
-    roster = Mock(status_code=200)
-    roster.json.return_value = {"data": {"players": [], "arenas": []}}
-    cards = Mock(status_code=200)
-    cards.json.return_value = {"data": [{"cardId": 1}], "links": {"next": None}}
-    get = Mock(
-        side_effect=lambda url, **kwargs: cards if url.endswith("/cards") else roster
-    )
-    monkeypatch.setattr(api._session, "get", get)
-    return clock, get, cards
+from matchplay_score import matchplay_api as api, web
+from matchplay_score.snapshot_store import RedisStore
 
 
-def test_viewers_share_one_roster_and_card_fetch(upstream):
-    _, get, _ = upstream
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(api.get_cards, [123] * 8))
-    assert get.call_count == 2
-    results[0][0]["cardId"] = 99
-    assert results[1][0]["cardId"] == 1
-    assert api.get_tournament_data(123) == {"players": [], "arenas": []}
-    assert get.call_count == 2
-
-
-def test_cached_readers_do_not_wait_for_an_active_refresh(upstream):
-    clock, get, _ = upstream
-    api.get_cards(123)
-    original_timestamp = api.snapshot_status(123)[0]
-    clock[0] += 26
-    started = Event()
-    release = Event()
-    original_get = get.side_effect
-
-    def slow_refresh(url, **kwargs):
-        started.set()
-        assert release.wait(timeout=5)
-        return original_get(url, **kwargs)
-
-    get.side_effect = slow_refresh
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        refresh = pool.submit(api.get_cards, 123)
-        try:
-            assert started.wait(timeout=5)
-            cached = pool.submit(api.get_cards, 123)
-            assert cached.result(timeout=1) == [{"cardId": 1}]
-            assert not refresh.done()
-            assert api.snapshot_status(123)[0] == original_timestamp
-        finally:
-            release.set()
-        assert refresh.result(timeout=5) == [{"cardId": 1}]
-
-
-def test_tournament_index_makes_no_matchplay_requests(upstream, monkeypatch):
-    from matchplay_score import web
-
-    _, get, _ = upstream
-    forbidden = Mock(side_effect=AssertionError("Homepage must use configuration only"))
-    monkeypatch.setattr(web, "best_cards", forbidden)
-    monkeypatch.setattr(web, "get_tournament_data_cached", forbidden)
-    with web.app.test_client() as client:
-        response = client.get("/index")
-    assert response.status_code == 200
-    for title in web.TOURNAMENT_INFO.values():
-        assert title in response.text
-    forbidden.assert_not_called()
-    get.assert_not_called()
-
-
-def test_new_scores_available_after_twenty_five_seconds(upstream):
-    clock, get, cards = upstream
-    assert api.get_cards(123) == [{"cardId": 1}]
-    clock[0] += 24
-    api.get_cards(123)
-    assert get.call_count == 2
-    cards.json.return_value["data"] = [{"cardId": 2}]
-    clock[0] += 2
-    assert api.get_cards(123) == [{"cardId": 2}]
-    assert get.call_count == 4
-
-
-def test_old_snapshot_alone_is_not_reported_as_a_failure(upstream):
-    clock, get, _ = upstream
-    api.get_cards(123)
-    assert api.snapshot_details(123)["state"] == "ready"
-    clock[0] += 26
-    health = api.snapshot_details(123)
-    assert health["state"] == "cached"
-    assert health["retry_at"] == ""
-    assert get.call_count == 2
-
-
-@pytest.mark.parametrize(
-    "error, reason",
-    [
-        (requests.Timeout(), "timeout"),
-        (requests.ConnectionError(), "network_error"),
-        (ValueError("Invalid JSON"), "invalid_response"),
-    ],
-)
-def test_failed_update_keeps_scores_and_explains_why(upstream, error, reason):
-    clock, get, _ = upstream
-    api.get_cards(123)
-    clock[0] += 26
-    get.side_effect = error
-    assert api.get_cards(123) == [{"cardId": 1}]
-    health = api.snapshot_details(123)
-    assert health["state"] == reason
-    assert health["retry_at"]
-
-
-def test_shared_cache_failure_uses_local_copy_without_refreshing_matchplay(
-    upstream, monkeypatch
-):
-    clock, get, _ = upstream
-    api.get_cards(123)
-    clock[0] += 26
-    broken = Mock()
-    broken.get.side_effect = OSError("Cache connection failed")
-    monkeypatch.setattr(api, "_shared", lambda: broken)
-    assert api.get_cards(123) == [{"cardId": 1}]
-    assert api.snapshot_details(123)["state"] == "cache_unavailable"
-    assert get.call_count == 2
-    assert "cache_unavailable" not in api._cache["tournament:123"]
-
-
-def test_empty_cache_is_waiting_rather_than_cache_failure(upstream):
-    _, get, _ = upstream
-    assert api.snapshot_details(123)["state"] == "waiting"
-    assert api.get_cached_tournament_snapshot(123) is None
-    get.assert_not_called()
-
-
-def test_rate_limit_preserves_cards_and_timestamp(upstream, caplog, request):
-    sink = api.logger.add(caplog.handler, format="{message}")
-    request.addfinalizer(lambda: api.logger.remove(sink))
-    clock, get, _ = upstream
-    api.get_cards(123)
-    original = api.snapshot_status(123)[0]
-    clock[0] += 26
-    response = Mock(status_code=429, headers={"Retry-After": "120"})
-    response.raise_for_status.side_effect = requests.HTTPError("429")
-    get.side_effect = lambda *args, **kwargs: response
-    assert api.get_cards(123) == [{"cardId": 1}]
-    assert api.snapshot_status(123) == (original, True)
-    assert api.get_cards(123) == [{"cardId": 1}]
-    assert get.call_count == 3
-    assert "status=429" in caplog.text
-    assert "cooldown_seconds=120" in caplog.text
-    assert api.snapshot_details(123)["state"] == "rate_limited"
-    with pytest.raises(requests.HTTPError, match="cooldown"):
-        api.get_cards(999)
-    assert get.call_count == 3
-
-
-def test_failed_second_card_page_keeps_complete_previous_list(upstream):
-    clock, get, _ = upstream
-    api.get_cards(123)
-    clock[0] += 26
-    first = Mock(status_code=200)
-    first.json.return_value = {
-        "data": [{"cardId": 2}],
-        "links": {"next": api.API_ORIGIN + "/api/page/2"},
+def snapshot(store):
+    return {
+        "fetched_at": store.now() - 10000,
+        "tournament": {
+            "arenas": [
+                {"arenaId": 1, "name": "Stars", "tournamentArena": {"status": "active"}}
+            ],
+            "players": [{"playerId": 1, "name": "Saved Player"}],
+        },
+        "cards": [
+            {
+                "cardId": 1,
+                "playerId": 1,
+                "singlePlayerGames": [
+                    {"arenaId": 1, "playerId": 1, "score": 1234},
+                ],
+            }
+        ],
     }
-    get.side_effect = [
-        Mock(json=lambda: {"data": {"players": [], "arenas": []}}),
-        first,
-        requests.Timeout(),
+
+
+@pytest.mark.parametrize("saved", [False, True])
+def test_all_page_reads_never_invoke_publisher_or_matchplay(stores, saved):
+    store = stores()
+    if saved:
+        import json
+
+        store.command(
+            "SET", store.key("tournament:281672"), json.dumps(snapshot(store))
+        )
+    paths = [
+        "/ranking/281672",
+        "/monitor/281672",
+        "/overlay/281672",
+        "/player/281672/Saved_Player",
+        "/machines/281672",
+        "/health/281672",
+        "/how-it-works/281672",
+        "/index",
+        "/",
     ]
-    assert api.get_cards(123) == [{"cardId": 1}]
+    with (
+        patch.object(
+            web, "Publisher", side_effect=AssertionError("A page must not publish")
+        ),
+        patch(
+            "matchplay_score.publisher.requests.Session.get",
+            side_effect=AssertionError("A page must not contact Match Play"),
+        ) as upstream,
+    ):
+        for _ in range(3):
+            with web.app.test_client() as client:
+                for path in paths:
+                    result = client.get(path, headers={"X-Requested-With": "ScoreHigh"})
+                    assert result.status_code in {200, 503}, (path, result.status_code)
+        upstream.assert_not_called()
 
 
-def test_vercel_workers_reuse_shared_runtime_cache(upstream, monkeypatch):
-    _, get, _ = upstream
+def test_expired_snapshot_keeps_timestamp_and_survives_reader_restarts(stores):
+    import json
 
-    class Shared:
-        def __init__(self):
-            self.data = {}
-
-        def get(self, key):
-            return deepcopy(self.data.get(key))
-
-        def set(self, key, value, options):
-            self.data[key] = deepcopy(value)
-
-    shared = Shared()
-    monkeypatch.setattr(api, "_shared", lambda: shared)
-    api.get_cards(123)
+    store = stores()
+    old = snapshot(store)
+    store.command("SET", store.key("tournament:281672"), json.dumps(old))
+    original = api.get_tournament_snapshot(281672)
     api._cache.clear()
-    clock = upstream[0]
-    clock[0] += 30
-    assert api.get_cached_tournament_snapshot(123)["cards"] == [{"cardId": 1}]
-    assert get.call_count == 2
-    clock[0] += api.STALE_TTL
-    assert api.get_cached_tournament_snapshot(123) is None
-    assert get.call_count == 2
-    clock[0] = 1000
-    assert api.get_cards(123) == [{"cardId": 1}]
-    assert get.call_count == 2
+    assert api.get_tournament_snapshot(281672) == original
+    assert api.snapshot_details(281672)["snapshot_age_seconds"] >= 10000
+    assert api.snapshot_details(281672)["state"] == "cached"
 
 
-def test_block_external_pagination(upstream):
-    _, get, _ = upstream
-    with pytest.raises(ValueError, match="origin"):
-        api.get_paginated_data("https://example.com/cards")
-    assert get.call_count == 0
+def test_one_consistent_pair_is_used_for_each_browser_request(stores):
+    import json
+
+    store = stores()
+    old = snapshot(store)
+    store.command("SET", store.key("tournament:281672"), json.dumps(old))
+    with web.app.test_request_context("/ranking/281672"):
+        roster = api.get_tournament_data(281672)
+        changed = deepcopy(old)
+        changed["cards"] = []
+        store.command("SET", store.key("tournament:281672"), json.dumps(changed))
+        assert api.get_cards(281672) == old["cards"]
+        assert roster == old["tournament"]
+    assert api.get_cards(281672) == []
 
 
-@pytest.mark.parametrize("value", ["nan", "inf", None, "bad", "-2"])
-def test_retry_after_is_finite(value):
-    assert api.retry_seconds(value) == 60
+def test_shared_storage_failure_retains_local_snapshot_without_fetch(
+    stores, monkeypatch
+):
+    import json
+
+    store = stores()
+    store.command("SET", store.key("tournament:281672"), json.dumps(snapshot(store)))
+    api.get_tournament_snapshot(281672)
+    broken = RedisStore(
+        transport=lambda *args: (_ for _ in ()).throw(
+            OSError("private-provider-details")
+        )
+    )
+    monkeypatch.setattr(api, "get_store", lambda: broken)
+    with patch(
+        "matchplay_score.publisher.requests.Session.get",
+        side_effect=AssertionError("No fallback fetch"),
+    ):
+        assert api.get_cards(281672)
+        assert api.snapshot_details(281672)["state"] == "cache_unavailable"
+
+
+def test_health_is_read_only_and_contains_no_credentials(stores):
+    import json
+
+    store = stores()
+    old = snapshot(store)
+    store.command("SET", store.key("tournament:281672"), json.dumps(old))
+    before = store.command("DBSIZE")
+    response = web.app.test_client().get("/health/281672")
+    assert response.status_code == 200
+    assert response.json["read_only"] is True
+    assert response.json["snapshot_age_seconds"] >= 10000
+    assert "no-store" in response.headers["Cache-Control"]
+    assert store.command("DBSIZE") == before
+    assert store.snapshot(281672) == old

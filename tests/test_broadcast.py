@@ -7,6 +7,7 @@ import pytest
 from matchplay_score import broadcast, matchplay_api as api, web
 from matchplay_score.examples import example_history, example_standings
 from matchplay_score.tournament import Card, SinglePlayerGame
+from matchplay_score.snapshot_store import RedisStore
 
 
 def test_top_cards_are_personal_bests_and_exclude_invalid_and_voided():
@@ -70,12 +71,17 @@ def test_overlay_reads_one_complete_shared_snapshot():
 
 
 @pytest.mark.parametrize(
-    "age, expected", [(0, 200), (30, 200), (3601, 503), (None, 503)]
+    "age, expected", [(0, 200), (30, 200), (3601, 200), (None, 503)]
 )
 def test_obs_never_fetches_matchplay_even_when_cache_is_stale_or_missing(
     monkeypatch, age, expected
 ):
     monkeypatch.setattr(api, "time", lambda: 10000)
+    monkeypatch.setattr(
+        api,
+        "get_store",
+        lambda: RedisStore(),
+    )
     if age is not None:
         api._cache["tournament:281672"] = {
             "fetched_at": 10000 - age,
@@ -106,7 +112,7 @@ def test_obs_never_fetches_matchplay_even_when_cache_is_stale_or_missing(
             side_effect=AssertionError("OBS must not refresh"),
         ),
         patch.object(
-            api._session,
+            requests.sessions.Session,
             "get",
             side_effect=AssertionError("OBS must not call Match Play"),
         ) as network,

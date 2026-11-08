@@ -33,27 +33,18 @@ Display settings provide light/dark/system colors, a simple layout, Classic Wind
 
 ## Score snapshots and caching
 
-The live Flask/Vercel application reads Match Play directly and shares a complete
-tournament roster and card list for 15 seconds. Browsers check every 10 seconds;
-public HTML has a five-second CDN cache. There is no GitHub Pages feed in the live
-data path. Typical updates take about 15-30 seconds, plus Match Play response time.
+Browsers check saved snapshots every 25 seconds. Pages never contact Match Play,
+publish snapshots, or paginate, including when storage is empty or data is old.
+A separate authenticated publisher fetches once on behalf of all visitors.
 
-On Vercel, the Python SDK stores successful responses and cooldown state in the
-regional Runtime Cache. All functions use the `iad1` region. A process lock
-coalesces concurrent reads in each worker; Runtime Cache reuses data between
-workers. This cache is not a distributed lock, so simultaneous cold workers can
-still overlap requests. Rate-limit responses back off and honor longer
-Retry-After values, with no automatic HTTP retries or artificial sleeps.
-Cached readers bypass an active refresh instead of waiting behind its lock.
+Redis stores complete snapshots, a shared publisher lease, request budgets and
+cooldown state. A failed update keeps the last complete snapshot and its original
+timestamp. Health information is available at `/health/<tournament_id>`.
 
-A failed card page never replaces a complete list with partial results. Previously
-fetched scores remain available for up to an hour during an outage, with their
-original timestamps and a cached-score notice. Missing shared cache data during a
-cache outage returns an error rather than starting uncontrolled API requests.
-
-Deploy with `vercel deploy --prod` after `vercel link`. No external snapshot URL
-or local disk cache is required. The separate GitHub Pages exporter is still
-available for static snapshots; it cannot provide live tournament updates.
+Configure shared storage and a trusted publisher schedule before deploying.
+[Publisher setup and verification](PUBLISHER.md) covers the required settings,
+rate-limit handling, migration, diagnostics and tests. The static GitHub Pages
+exporter reads saved data too; it does not refresh Match Play.
 
 Player URLs use underscores for spaces. Player histories show Voided only when
 Match Play flags the card as voided, and exclude it from standings. Starting a

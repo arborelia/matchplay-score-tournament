@@ -1,7 +1,6 @@
 __package__ = "matchplay_score"
 from .matchplay_api import get_cards, get_tournament_data, get_tournament_data_cached
 from .tournament import (
-    UNKNOWN,
     Card,
     creation_order,
     parse_card,
@@ -24,14 +23,6 @@ def best_cards(
     excluded_by_player: dict[str, Card] = {}
     for card_item in card_data:
         card: Card = parse_card(card_item, tournament)
-        if (
-            use_cache
-            and card.player_name == UNKNOWN
-            and (card.is_valid() or include_invalid)
-        ):
-            return best_cards(
-                tournament_id, use_cache=False, include_invalid=include_invalid
-            )
         if card.is_valid():
             if card.player_name not in cards_by_player or (
                 cards_by_player[card.player_name].computed_score()
@@ -64,8 +55,6 @@ def player_cards(
     tournament = parse_tournament(tournament_data)
     if player_name not in tournament.players_by_id.values() and "_" in player_name:
         player_name = player_name.replace("_", " ")
-    if use_cache and player_name not in tournament.players_by_id.values():
-        tournament = parse_tournament(get_tournament_data(tournament_id))
     cards = [parse_card(item, tournament) for item in get_cards(tournament_id)]
     matching = [card for card in cards if card.player_name == player_name]
     dated = [card for card in matching if card.created_at or card.card_id]

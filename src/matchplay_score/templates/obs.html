@@ -22,7 +22,7 @@
       <p data-obs-copy-status role="status"></p>
       <p>In OBS, add a <strong>Browser</strong> source, paste this URL, and set its size to <strong>640 × 270</strong>. Position it in the upper-right player panel. On a 1440 × 810 canvas, use <strong>480 × 200</strong>.</p>
       <p>The default cycle shows recent cards, then the top three, and repeats. Recent cards includes cards in progress, ordered by their latest submitted game. Top cards uses each player's highest valid card. Voided and invalid cards stay off the stream.</p>
-      <p>Checks saved tournament data every 25 seconds. OBS never requests data from Match Play. Keep the tournament standings open with automatic updates on to refresh the shared data. The current card stays visible if updates are unavailable.</p>
+      <p>Checks saved tournament data every 25 seconds. Only the coordinated publisher contacts Match Play; opening a page never refreshes the source. The current card stays visible if updates are unavailable.</p>
       <a href="{{ url_for('render_ranking', tournament_id=tournament_id) }}">Back to standings</a>
     </div>
     <div class="obs-preview-wrap"><iframe title="OBS card preview" data-obs-preview src="{{ url_for('render_overlay', tournament_id=tournament_id) }}" width="640" height="270"></iframe></div>
